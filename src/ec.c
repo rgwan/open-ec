@@ -98,17 +98,17 @@ static void clock_setup(void)
 	/* Enable clocks. */
 	rcc_periph_clock_enable(RCC_GPIOB);
 	rcc_periph_clock_enable(RCC_GPIOA);
-	rcc_periph_clock_enable(RCC_AFIO);
+	//rcc_periph_clock_enable(RCC_AFIO);
 	rcc_periph_clock_enable(RCC_USART1);
 	
 	SCB_VTOR = 0x08000000; //TODO: Bootloader support
 }
 
-#define rts_set() gpio_set(GPIOB, GPIO15); gpio_set(GPIOB, GPIO10)
-#define rts_clr() gpio_clear(GPIOB, GPIO15); gpio_clear(GPIOB, GPIO10)
+#define dtr_set() gpio_set(GPIOB, GPIO15); gpio_set(GPIOB, GPIO10)
+#define dtr_clr() gpio_clear(GPIOB, GPIO15); gpio_clear(GPIOB, GPIO10)
 
-#define dtr_set() gpio_set(GPIOA, GPIO2); gpio_set(GPIOB, GPIO11)
-#define dtr_clr() gpio_clear(GPIOA, GPIO2); gpio_clear(GPIOB, GPIO11)
+#define rts_set() gpio_set(GPIOA, GPIO2); gpio_set(GPIOB, GPIO11)
+#define rts_clr() gpio_clear(GPIOA, GPIO2); gpio_clear(GPIOB, GPIO11)
 
 static void gpio_setup(void)
 {
@@ -338,6 +338,7 @@ static int ec_control_request(usbd_device *usbd_dev, struct usb_setup_data *req,
 			{
 				if(port == 2) /* 忽略掉 MPSSE口 */
 				{
+				#if 1
 					uint8_t wValueH = req->wValue >> 8;
 					if(wValueH & FTDI_SIO_SET_DTR_MASK)
 					{
@@ -361,6 +362,7 @@ static int ec_control_request(usbd_device *usbd_dev, struct usb_setup_data *req,
 							rts_clr();
 						}
 					}
+				#endif
 				}
 			}
 		}
@@ -580,6 +582,9 @@ static void interrupt_setup(void)
 	nvic_enable_irq(NVIC_USB_WAKEUP_IRQ);
 	nvic_enable_irq(NVIC_USART1_IRQ);
 
+	/* 开接收中断 */
+	USART_CR1(USART1) |= USART_CR1_RXNEIE;
+
 	__asm__("cpsie i"); 
 }
 
@@ -626,16 +631,15 @@ static void uart_setup(void)
 	usart_set_flow_control(USART1, USART_FLOWCONTROL_NONE);
 	usart_set_mode(USART1, USART_MODE_TX_RX); //TODO:奇偶校验，stop bit
 
-	/* 开接收中断 */
-	USART_CR1(USART1) |= USART_CR1_RXNEIE;
-
 	usart_enable(USART1);	
 }
 
 void usart1_isr(void) //串口中断
 {
-	if (((USART_CR1(USART1) & USART_CR1_RXNEIE) != 0) &&
-	    ((USART_SR(USART1) & USART_SR_RXNE) != 0)) {
+	volatile int UART_CR = USART_CR1(USART1);
+	volatile int UART_SR = USART_SR(USART1);
+
+	if ((USART_SR(USART1) & USART_SR_RXNE) != 0) {
 		gpio_toggle(GPIOB, GPIO10);
 		ring_write_ch(&serial_out_ring, usart_recv(USART1)); //接收
 	}
@@ -654,6 +658,7 @@ void usart1_isr(void) //串口中断
 			usbd_ep_nak_set(usbd_dev_handler, 0x04, 0); //开放USB接收
 		
 		if (data == -1) { //没有即停止
+			usbd_ep_nak_set(usbd_dev_handler, 0x04, 0); //开放USB接收
 			USART_CR1(USART1) &= ~USART_CR1_TXEIE;
 			return;
 		} else {
@@ -663,6 +668,7 @@ void usart1_isr(void) //串口中断
 }
 
 /* 串口结束 */
+
 int main(void)
 {
 	volatile int i;
@@ -686,6 +692,9 @@ int main(void)
 	for (i = 0; i < 0x80000; i++)
 		__asm__("nop");
 	gpio_set(GPIOA, GPIO8);//开USB上拉
+	
+
+
 		
 	while(1)
 	{
