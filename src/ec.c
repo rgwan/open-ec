@@ -314,6 +314,8 @@ enum ftdi_mpsse_mode
 
 uint8_t bulkout_buf[2][64] = {{0x01, 0x60}, {0x01, 0x60}};
 volatile uint8_t latency_timer[2] = {16, 16};
+
+uint8_t dtr = 1, rts = 1;
 //volatile uint32_t baudrate_divisor[2];
 
 uint8_t handler_buf[8];
@@ -374,23 +376,38 @@ static int ec_control_request(usbd_device *usbd_dev, struct usb_setup_data *req,
 					{
 						if(req->wValue & FTDI_SIO_SET_DTR_MASK)
 						{
-							dtr_set();
+							dtr = 1;
 						}
 						else
 						{
-							dtr_clr();
+							dtr = 0;
 						}
 					}
 					if(wValueH & FTDI_SIO_SET_RTS_MASK)
 					{
 						if(req->wValue & FTDI_SIO_SET_RTS_MASK)
 						{
-							rts_set();
+							rts = 1;
 						}
 						else
 						{
-							rts_clr();
+							rts = 0;
 						}
+					}
+					if(dtr == rts)
+					{
+						dtr_set();
+						rts_set();
+					}
+					if(dtr == 1 && rts == 0)
+					{
+						rts_clr();
+						dtr_clr();
+					}
+					if(dtr == 0 && rts == 1)
+					{
+						rts_set();
+						dtr_clr();
 					}
 				#endif
 				}
