@@ -453,7 +453,7 @@ struct ring {
 #define RING_DATA(RING)  (RING)->data
 #define RING_EMPTY(RING) ((RING)->begin == (RING)->end)
 
-static void ring_init(volatile struct ring *ring, volatile uint8_t *buf, ring_size_t size)
+static void ring_init(volatile struct ring *ring, uint8_t *buf, ring_size_t size)
 {
 	ring->data = buf;
 	ring->size = size;
@@ -533,10 +533,10 @@ volatile struct ring serial_in_ring;
 volatile struct ring serial_out_ring;
 
 /* 256 byte的 收发缓冲区 */
-volatile uint8_t ringbuf_jtag_in_buffer[BUFFER_SIZE_IN];
-volatile uint8_t ringbuf_jtag_out_buffer[BUFFER_SIZE_OUT];
-volatile uint8_t ringbuf_serial_in_buffer[BUFFER_SIZE_IN];
-volatile uint8_t ringbuf_serial_out_buffer[BUFFER_SIZE_OUT];
+ uint8_t ringbuf_jtag_in_buffer[BUFFER_SIZE_IN];
+ uint8_t ringbuf_jtag_out_buffer[BUFFER_SIZE_OUT];
+ uint8_t ringbuf_serial_in_buffer[BUFFER_SIZE_IN];
+ uint8_t ringbuf_serial_out_buffer[BUFFER_SIZE_OUT];
 
 static void ring_init_all(void)
 {
@@ -574,19 +574,19 @@ static void serial_data_rx_cb(usbd_device *usbd_dev, uint8_t ep)
 
 	uint8_t buf[64];
 	int len = usbd_ep_read_packet(usbd_dev, 0x04, buf, 64);
+	int remains = ring_remain(&serial_in_ring);
 	
+	if(remains < 72)
+	{
+		usbd_ep_nak_set(usbd_dev, 0x04, 1); //阻塞
+	}
+		
 	if(len)
 	{
 		ring_write(&serial_in_ring, buf, len);
 		USART_CR1(USART1) |= USART_CR1_TXEIE;//开USART1空发送中断
 	}
 	
-	if(ring_remain(&serial_in_ring) < 128)
-	{
-		usbd_ep_nak_set(usbd_dev, 0x04, 1); //阻塞
-	}
-
-	gpio_toggle(GPIOB, GPIO2);
 }
 
 /* 数据处理结束 */
@@ -702,26 +702,28 @@ static void uart_setup(void)
 
 void usart1_isr(void) //串口中断
 {
-
+	gpio_toggle(GPIOB, GPIO2);
 	if ((USART_SR(USART1) & USART_SR_RXNE) != 0) {
-		ring_write_ch(&serial_out_ring, usart_recv(USART1)); //接收
+		ring_write_ch(&serial_out_ring, USART_DR(USART1) & USART_DR_MASK); //接收
 	}
 
 	/* 发送完成中断 */
-	if (((USART_SR(USART1) & USART_SR_TXE) != 0)) {
+	if (((USART_SR(USART1) & USART_SR_TXE) != 0) && ((USART_CR1(USART1) & USART_CR1_TXEIE) != 0)) 
+	{
 
-		volatile int32_t data =ring_read_ch(&serial_in_ring, NULL);
-		
+		volatile int32_t data = ring_read_ch(&serial_in_ring, NULL);
+
 		volatile int size = ring_remain(&serial_in_ring);
-		if(size >= 128)
+
+		if(size == 128)
+		{
 			usbd_ep_nak_set(usbd_dev_handler, 0x04, 0); //开放USB接收
-		
+		}
 		if (data == -1) { //没有即停止
-			usbd_ep_nak_set(usbd_dev_handler, 0x04, 0); //开放USB接收
 			USART_CR1(USART1) &= ~USART_CR1_TXEIE;
-			return;
+			usbd_ep_nak_set(usbd_dev_handler, 0x04, 0); //开放USB接收
 		} else {
-			usart_send(USART1, data); //发送数据
+			USART_DR(USART1) = data & USART_DR_MASK; //发送数据
 		}
 	}
 }
