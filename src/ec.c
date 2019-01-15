@@ -267,6 +267,7 @@ void usb_hp_can_tx_isr(void)
 void usb_lp_can_rx0_isr(void)
 	__attribute__ ((alias ("usb_int_relay")));
 
+
 static void usb_int_relay(void) 
 {
 	usbd_poll(usbd_dev_handler);
@@ -443,6 +444,13 @@ static int ec_control_request(usbd_device *usbd_dev, struct usb_setup_data *req,
 				*len = 1; /* 送回latency_timer */
 				return 1;
 			}
+			case FTDI_SIO_GET_MODEM_STATUS:
+			{
+				handler_buf[0] = 0x60;
+				*buf = handler_buf;
+				*len = 1; /* Modem status */
+				return 1;
+			}
 			case FTDI_SIO_READ_EEPROM: /* 直接全部返回FF */
 			{
 				handler_buf[0] = 0xff;
@@ -594,7 +602,7 @@ static void serial_data_rx_cb(usbd_device *usbd_dev, uint8_t ep)
 	int len = usbd_ep_read_packet(usbd_dev, 0x04, buf, 64);
 	int remains = ring_remain(&serial_in_ring);
 	
-	if(remains < 128)
+	if(remains - len < 64)
 	{
 		usbd_ep_nak_set(usbd_dev, 0x04, 1); //阻塞
 	}
@@ -647,9 +655,9 @@ static void interrupt_setup(void)
 	nvic_set_priority(NVIC_USB_HP_CAN_TX_IRQ, 1 << 4);
 	nvic_set_priority(NVIC_SYSTICK_IRQ, 2 << 4);//systick最低优先级
 	
-	nvic_enable_irq(NVIC_USB_HP_CAN_TX_IRQ);
+	//nvic_enable_irq(NVIC_USB_HP_CAN_TX_IRQ);
 	nvic_enable_irq(NVIC_USB_LP_CAN_RX0_IRQ);
-	nvic_enable_irq(NVIC_USB_WAKEUP_IRQ);
+	//nvic_enable_irq(NVIC_USB_WAKEUP_IRQ);
 	nvic_enable_irq(NVIC_USART1_IRQ);
 
 
@@ -671,36 +679,36 @@ void sys_tick_handler(void)
 static void usb_packet_handler(void)
 {
 	uint8_t timeout;
-	if(ring_size(&serial_out_ring) > 62 && usbd_ep_stall_get(usbd_dev_handler, 0x83) == 0) //需要接收 (串口)
+	if(ring_size(&serial_out_ring) > 62 )//&& usbd_ep_stall_get(usbd_dev_handler, 0x83) == 0) //需要接收 (串口)
 	{
 		ring_read(&serial_out_ring, bulkout_buf[1] + 2, 62);//读62个byte
-		//timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 64) == 0) {timeout++; if (timeout > 4) break;} //发MPSSE
-		usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 64);
+		timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 64) == 0) {timeout++; if (timeout > 16) break;} //发MPSSE
+		//usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 64);
 	}
 
-	if(ring_size(&jtag_out_ring) > 62 && usbd_ep_stall_get(usbd_dev_handler, 0x81) == 0) //需要接收 (MPSSE)
+	if(ring_size(&jtag_out_ring) > 62 )//&& usbd_ep_stall_get(usbd_dev_handler, 0x81) == 0) //需要接收 (MPSSE)
 	{
 		ring_read(&jtag_out_ring, bulkout_buf[0] + 2, 62);//读62个byte
-		//timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[1], 64) == 0) {timeout++; if (timeout > 4) break;} //发出去
-		usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[1], 64);
+		timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[1], 64) == 0) {timeout++; if (timeout > 16) break;} //发出去
+		//usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[1], 64);
 	}	
 	
 	if((unsigned)(timer_count - last_send) > latency_timer[0]) //超时
 	{
 		last_send = timer_count;
 		int len;
-		if(usbd_ep_stall_get(usbd_dev_handler, 0x81) == 0)
-		{
+		//if(usbd_ep_stall_get(usbd_dev_handler, 0x81) == 0)
+		//{
 			len = ring_read(&jtag_out_ring, bulkout_buf[0] + 2, 62);//读N个byte
-			//timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[0], 2 + len) == 0) {timeout++; if (timeout > 4) break;} //发MPSSE
-			usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[0], 2 + len);
-		}
-		if(usbd_ep_stall_get(usbd_dev_handler, 0x83) == 0)
-		{
+			timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[0], 2 + len) == 0) {timeout++; if (timeout > 16) break;} //发MPSSE
+			//usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[0], 2 + len);
+		//}
+		//if(usbd_ep_stall_get(usbd_dev_handler, 0x83) == 0)
+		//{
 			len = ring_read(&serial_out_ring, bulkout_buf[1] + 2, 62);//读N个byte
-			//timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 2 + len) == 0) {timeout++; if (timeout > 4) break;} //发串口
-			usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 2 + len);
-		}
+			timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 2 + len) == 0) {timeout++; if (timeout > 16) break;} //发串口
+			//usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 2 + len);
+		//}
 	}
 }
 /* 串口开始 */
@@ -712,7 +720,7 @@ static void uart_setup(void)
 	gpio_set_mode(GPIOA, GPIO_MODE_INPUT,
 			GPIO_CNF_INPUT_FLOAT, GPIO_USART1_RX);
 	
-	usart_set_baudrate(USART1, 9600);
+	usart_set_baudrate(USART1, 115200);
 	usart_set_databits(USART1, 8);
 	usart_set_stopbits(USART1, USART_STOPBITS_1);
 	usart_set_parity(USART1, USART_PARITY_NONE);
