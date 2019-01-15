@@ -125,6 +125,14 @@ static void gpio_setup(void)
 	gpio_set_mode(GPIOA, GPIO_MODE_OUTPUT_2_MHZ,
 			GPIO_CNF_OUTPUT_OPENDRAIN, GPIO2);  //1.8V IO RST脚（RTS）
 
+	gpio_set_mode(GPIOA, GPIO_MODE_OUTPUT_50_MHZ,
+			GPIO_CNF_OUTPUT_PUSHPULL, GPIO5 | GPIO7); //TCK TDI
+	gpio_set_mode(GPIOB, GPIO_MODE_OUTPUT_50_MHZ,
+			GPIO_CNF_OUTPUT_PUSHPULL, GPIO14); //TMS
+	gpio_set_mode(GPIOA, GPIO_MODE_INPUT,
+			GPIO_CNF_INPUT_FLOAT, GPIO6); //TDO
+	//暂且用Bitbang模拟MPSSE
+				
 	dtr_set();
 	rts_set();
 }
@@ -136,6 +144,9 @@ static void gpio_setup(void)
 #include <libopencm3/usb/usbd.h>
 
 usbd_device *usbd_dev_handler;
+
+
+uint8_t st_usbfs_ep_out_free(usbd_device *dev, uint8_t addr);
 
 static const struct usb_device_descriptor dev = {
 	.bLength = USB_DT_DEVICE_SIZE,
@@ -282,6 +293,21 @@ static void usb_int_relay(void)
 #define FTDI_SIO_SET_DTR_MASK 0x1
 #define FTDI_SIO_SET_RTS_MASK 0x2
 
+/** MPSSE bitbang modes */
+enum ftdi_mpsse_mode
+{
+    BITMODE_RESET  = 0x00,    /**< switch off bitbang mode, back to regular serial/FIFO */
+    BITMODE_BITBANG= 0x01,    /**< classical asynchronous bitbang mode, introduced with B-type chips */
+    BITMODE_MPSSE  = 0x02,    /**< MPSSE mode, available on 2232x chips */
+    BITMODE_SYNCBB = 0x04,    /**< synchronous bitbang mode, available on 2232x and R-type chips  */
+    BITMODE_MCU    = 0x08,    /**< MCU Host Bus Emulation mode, available on 2232x chips */
+    /* CPU-style fifo mode gets set via EEPROM */
+    BITMODE_OPTO   = 0x10,    /**< Fast Opto-Isolated Serial Interface Mode, available on 2232x chips  */
+    BITMODE_CBUS   = 0x20,    /**< Bitbang on CBUS pins of R-type chips, configure in EEPROM before */
+    BITMODE_SYNCFF = 0x40,    /**< Single Channel Synchronous FIFO mode, available on 2232H chips */
+    BITMODE_FT1284 = 0x80,    /**< FT1284 mode, available on 232H chips */
+};
+
 /* Control request handler */
 
 
@@ -291,6 +317,8 @@ volatile uint8_t latency_timer[2] = {16, 16};
 
 uint8_t handler_buf[8];
 /* 尴尬的双串口，虽然有一个根本没用 */
+
+volatile uint8_t mpsse_enable = 0;
 
 
 #define C_CLK  48000000
@@ -330,7 +358,8 @@ static int ec_control_request(usbd_device *usbd_dev, struct usb_setup_data *req,
 			{
 				if(port == 2)
 				{//设置波特率
-					uart_set_baudrate(req->wValue | (req->wIndex >> 8));
+					uint8_t Baudrate_High = (req->wIndex >> 8);
+					uart_set_baudrate(req->wValue | (Baudrate_High << 16));
 				}
 				return 1;
 			}
@@ -364,6 +393,24 @@ static int ec_control_request(usbd_device *usbd_dev, struct usb_setup_data *req,
 					}
 				#endif
 				}
+				return 1;
+			}
+			case FTDI_SIO_SET_BITMODE:
+			{
+				if(port == 1) /* MPSSE口 */
+				{
+					enum ftdi_mpsse_mode mode = req->wValue >> 8;
+					uint8_t bitmask = req->wValue & 0xff;
+					if(mode == BITMODE_RESET)
+					{//BITMODE复位
+						mpsse_enable = 0;
+					}
+					else if(mode == BITMODE_MPSSE)
+					{//TODO: 仅支持MPSSE
+						mpsse_enable = 1;
+					}
+				}
+				return 1;
 			}
 		}
 	}
@@ -406,7 +453,7 @@ struct ring {
 #define RING_DATA(RING)  (RING)->data
 #define RING_EMPTY(RING) ((RING)->begin == (RING)->end)
 
-static void ring_init(struct ring *ring, uint8_t *buf, ring_size_t size)
+static void ring_init(volatile struct ring *ring, volatile uint8_t *buf, ring_size_t size)
 {
 	ring->data = buf;
 	ring->size = size;
@@ -414,7 +461,7 @@ static void ring_init(struct ring *ring, uint8_t *buf, ring_size_t size)
 	ring->end = 0;
 }
 
-static inline int32_t ring_write_ch(struct ring *ring, uint8_t ch)
+static inline int32_t ring_write_ch(volatile struct ring *ring, uint8_t ch)
 {
 	if (((ring->end + 1) % ring->size) != ring->begin) {
 		ring->data[ring->end++] = ch;
@@ -425,7 +472,7 @@ static inline int32_t ring_write_ch(struct ring *ring, uint8_t ch)
 	return -1;
 }
 
-static inline int32_t ring_write(struct ring *ring, uint8_t *data, ring_size_t size)
+static inline int32_t ring_write(volatile struct ring *ring, uint8_t *data, ring_size_t size)
 {
 	int32_t i;
 
@@ -437,7 +484,7 @@ static inline int32_t ring_write(struct ring *ring, uint8_t *data, ring_size_t s
 	return i;
 }
 
-static inline int32_t ring_read_ch(struct ring *ring, uint8_t *ch)
+static inline int32_t ring_read_ch(volatile struct ring *ring, uint8_t *ch)
 {
 	int32_t ret = -1;
 
@@ -451,7 +498,7 @@ static inline int32_t ring_read_ch(struct ring *ring, uint8_t *ch)
 	return ret;
 }
 
-static inline int32_t ring_read(struct ring *ring, uint8_t *data, ring_size_t size)
+static inline int32_t ring_read(volatile struct ring *ring, uint8_t *data, ring_size_t size)
 {
 	int32_t i;
 
@@ -464,32 +511,32 @@ static inline int32_t ring_read(struct ring *ring, uint8_t *data, ring_size_t si
 }
 
 
-static inline uint32_t ring_size(struct ring *ring)
+static inline uint32_t ring_size(volatile struct ring *ring)
 {
 	int size = (ring->end - ring->begin);
 	if (size < 0) size = size + ring->size;
 	return size;
 }
 
-static inline uint32_t ring_remain(struct ring *ring)
+static inline uint32_t ring_remain(volatile struct ring *ring)
 {
 	return ring->size - ring_size(ring);
 }
 
 
-#define BUFFER_SIZE_IN 128
+#define BUFFER_SIZE_IN 256
 #define BUFFER_SIZE_OUT 384
 
- struct ring jtag_in_ring;
- struct ring jtag_out_ring;
- struct ring serial_in_ring;
- struct ring serial_out_ring;
+volatile struct ring jtag_in_ring;
+volatile struct ring jtag_out_ring;
+volatile struct ring serial_in_ring;
+volatile struct ring serial_out_ring;
 
 /* 256 byte的 收发缓冲区 */
-uint8_t ringbuf_jtag_in_buffer[BUFFER_SIZE_IN];
-uint8_t ringbuf_jtag_out_buffer[BUFFER_SIZE_OUT];
-uint8_t ringbuf_serial_in_buffer[BUFFER_SIZE_IN];
-uint8_t ringbuf_serial_out_buffer[BUFFER_SIZE_OUT];
+volatile uint8_t ringbuf_jtag_in_buffer[BUFFER_SIZE_IN];
+volatile uint8_t ringbuf_jtag_out_buffer[BUFFER_SIZE_OUT];
+volatile uint8_t ringbuf_serial_in_buffer[BUFFER_SIZE_IN];
+volatile uint8_t ringbuf_serial_out_buffer[BUFFER_SIZE_OUT];
 
 static void ring_init_all(void)
 {
@@ -513,7 +560,7 @@ static void jtag_data_rx_cb(usbd_device *usbd_dev, uint8_t ep)
 		ring_write(&jtag_in_ring, buf, len);
 	}
 	
-	if(ring_remain(&jtag_in_ring) < 64) //缓冲区满
+	if(ring_remain(&jtag_in_ring) < 128) //缓冲区满
 	{
 		usbd_ep_nak_set(usbd_dev, 0x02, 1); //阻塞
 	}
@@ -534,7 +581,7 @@ static void serial_data_rx_cb(usbd_device *usbd_dev, uint8_t ep)
 		USART_CR1(USART1) |= USART_CR1_TXEIE;//开USART1空发送中断
 	}
 	
-	if(ring_remain(&serial_in_ring) < 64)
+	if(ring_remain(&serial_in_ring) < 128)
 	{
 		usbd_ep_nak_set(usbd_dev, 0x04, 1); //阻塞
 	}
@@ -564,7 +611,7 @@ static void ec_set_config(usbd_device *usbd_dev, uint16_t wValue)
 			NULL);
 	usbd_ep_setup(usbd_dev, 0x04, USB_ENDPOINT_ATTR_BULK, 64, serial_data_rx_cb); //Serial
 	
-	attached++;
+	attached = 1;
 }
 
 static void interrupt_setup(void)
@@ -576,11 +623,17 @@ static void interrupt_setup(void)
 	systick_interrupt_enable();
 	systick_counter_enable();
 
+	nvic_set_priority(NVIC_USART1_IRQ, 0);//串口最高优先级
+	nvic_set_priority(NVIC_USB_WAKEUP_IRQ, 1 << 4);
+	nvic_set_priority(NVIC_USB_LP_CAN_RX0_IRQ, 1 << 4);
+	nvic_set_priority(NVIC_USB_HP_CAN_TX_IRQ, 1 << 4);
+	nvic_set_priority(NVIC_SYSTICK_IRQ, 2 << 4);//systick最低优先级
 	
 	nvic_enable_irq(NVIC_USB_HP_CAN_TX_IRQ);
 	nvic_enable_irq(NVIC_USB_LP_CAN_RX0_IRQ);
 	nvic_enable_irq(NVIC_USB_WAKEUP_IRQ);
 	nvic_enable_irq(NVIC_USART1_IRQ);
+
 
 	/* 开接收中断 */
 	USART_CR1(USART1) |= USART_CR1_RXNEIE;
@@ -600,19 +653,32 @@ void sys_tick_handler(void)
 static void usb_packet_handler(void)
 {
 	uint8_t timeout;
-	if(ring_size(&serial_out_ring) > 62) //需要接收
+	if(ring_size(&serial_out_ring) > 62 )//&& st_usbfs_ep_out_free(usbd_dev_handler, 0x83)) //需要接收 (串口)
 	{
 		ring_read(&serial_out_ring, bulkout_buf[1] + 2, 62);//读62个byte
-		timeout = 0; while(usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 64) == 0) {timeout++; if (timeout > 2) break;} //发出去
+		timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 64) == 0) {timeout++; if (timeout > 10) break;} //发MPSSE
 	}
+
+	if(ring_size(&jtag_out_ring) > 62 )// && st_usbfs_ep_out_free(usbd_dev_handler, 0x81)) //需要接收 (MPSSE)
+	{
+		ring_read(&jtag_out_ring, bulkout_buf[0] + 2, 62);//读62个byte
+		timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[1], 64) == 0) {timeout++; if (timeout > 10) break;} //发出去
+	}	
 	
 	if((unsigned)(timer_count - last_send) > latency_timer[0]) //超时
 	{
 		last_send = timer_count;
-		timeout = 0; while(usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[0], 2) == 0) {timeout++; if (timeout > 2) break;}
-
-		int len = ring_read(&serial_out_ring, bulkout_buf[1] + 2, 62);//读62个byte
-		timeout = 0; while(usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 2 + len) == 0) {timeout++; if (timeout > 2) break;}
+		int len;
+		//if(st_usbfs_ep_out_free(usbd_dev_handler, 0x81))
+		//{
+			len = ring_read(&jtag_out_ring, bulkout_buf[0] + 2, 62);//读N个byte
+			timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[0], 2 + len) == 0) {timeout++; if (timeout > 10) break;} //发MPSSE
+		//}
+		//if(st_usbfs_ep_out_free(usbd_dev_handler, 0x83))
+		//{
+			len = ring_read(&serial_out_ring, bulkout_buf[1] + 2, 62);//读N个byte
+			timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 2 + len) == 0) {timeout++; if (timeout > 10) break;} //发串口
+		//}
 	}
 }
 /* 串口开始 */
@@ -636,25 +702,18 @@ static void uart_setup(void)
 
 void usart1_isr(void) //串口中断
 {
-	volatile int UART_CR = USART_CR1(USART1);
-	volatile int UART_SR = USART_SR(USART1);
 
 	if ((USART_SR(USART1) & USART_SR_RXNE) != 0) {
-		gpio_toggle(GPIOB, GPIO10);
 		ring_write_ch(&serial_out_ring, usart_recv(USART1)); //接收
 	}
 
 	/* 发送完成中断 */
-	if (((USART_CR1(USART1) & USART_CR1_TXEIE) != 0) &&
-	    ((USART_SR(USART1) & USART_SR_TXE) != 0)) {
+	if (((USART_SR(USART1) & USART_SR_TXE) != 0)) {
 
-		int32_t data;
+		volatile int32_t data =ring_read_ch(&serial_in_ring, NULL);
 		
-
-		data = ring_read_ch(&serial_in_ring, NULL);
-		
-		int size = ring_remain(&serial_in_ring);
-		if(size >= 64)
+		volatile int size = ring_remain(&serial_in_ring);
+		if(size >= 128)
 			usbd_ep_nak_set(usbd_dev_handler, 0x04, 0); //开放USB接收
 		
 		if (data == -1) { //没有即停止
@@ -668,6 +727,16 @@ void usart1_isr(void) //串口中断
 }
 
 /* 串口结束 */
+
+/* MPSSE处理 */
+
+static void mpsse_process(void)
+{
+	if(mpsse_enable == 1)
+	{
+		
+	}
+}
 
 int main(void)
 {
@@ -692,14 +761,13 @@ int main(void)
 	for (i = 0; i < 0x80000; i++)
 		__asm__("nop");
 	gpio_set(GPIOA, GPIO8);//开USB上拉
-	
-
 
 		
 	while(1)
 	{
 		if(attached)
 			usb_packet_handler();
+		mpsse_process();
 	}
 
 	return 0;
