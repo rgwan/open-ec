@@ -443,10 +443,10 @@ static int ec_control_request(usbd_device *usbd_dev, struct usb_setup_data *req,
 typedef int32_t ring_size_t;
 
 struct ring {
-	uint8_t *data;
-	ring_size_t size;
-	uint32_t begin;
-	uint32_t end;
+	volatile uint8_t *data;
+	volatile ring_size_t size;
+	volatile uint32_t begin;
+	volatile uint32_t end;
 };
 
 #define RING_SIZE(RING)  ((RING)->size - 1)
@@ -568,10 +568,13 @@ static void jtag_data_rx_cb(usbd_device *usbd_dev, uint8_t ep)
 	gpio_toggle(GPIOB, GPIO2);
 }
 
+uint8_t rx_buffer[64];
+volatile int rx_len;
+volatile int rx_i;
 static void serial_data_rx_cb(usbd_device *usbd_dev, uint8_t ep)
 {
 	(void)ep;
-
+#if 0
 	uint8_t buf[64];
 	int len = usbd_ep_read_packet(usbd_dev, 0x04, buf, 64);
 	
@@ -579,14 +582,21 @@ static void serial_data_rx_cb(usbd_device *usbd_dev, uint8_t ep)
 	{
 		ring_write(&serial_in_ring, buf, len);
 		USART_CR1(USART1) |= USART_CR1_TXEIE;//开USART1空发送中断
+		
 	}
-	
-	if(ring_remain(&serial_in_ring) < 128)
+	if(ring_remain(&serial_in_ring) < 128) //缓冲区满
 	{
 		usbd_ep_nak_set(usbd_dev, 0x04, 1); //阻塞
 	}
-
-	gpio_toggle(GPIOB, GPIO2);
+#else
+	rx_len = usbd_ep_read_packet(usbd_dev, 0x04, rx_buffer, 64);
+	if(rx_len)
+	{
+		rx_i = 0;
+		usbd_ep_nak_set(usbd_dev, 0x04, 1);//暴力单缓冲
+		USART_CR1(USART1) |= USART_CR1_TXEIE;
+	}
+#endif
 }
 
 /* 数据处理结束 */
@@ -702,27 +712,39 @@ static void uart_setup(void)
 
 void usart1_isr(void) //串口中断
 {
-
+	gpio_toggle(GPIOB, GPIO2);
+	/* 发送完成中断 */
 	if ((USART_SR(USART1) & USART_SR_RXNE) != 0) {
-		ring_write_ch(&serial_out_ring, usart_recv(USART1)); //接收
+		ring_write_ch(&serial_out_ring, USART_DR(USART1) & USART_DR_MASK); //接收
 	}
 
-	/* 发送完成中断 */
-	if (((USART_SR(USART1) & USART_SR_TXE) != 0)) {
-
-		volatile int32_t data =ring_read_ch(&serial_in_ring, NULL);
+	if (((USART_SR(USART1) & USART_SR_TXE) != 0) && ((USART_CR1(USART1) & USART_CR1_TXEIE) != 0)) 
+	{
+#if 0
+		volatile int32_t data = ring_read_ch(&serial_in_ring, NULL);
 		
 		volatile int size = ring_remain(&serial_in_ring);
 		if(size >= 128)
+		{
 			usbd_ep_nak_set(usbd_dev_handler, 0x04, 0); //开放USB接收
+		}
 		
 		if (data == -1) { //没有即停止
-			usbd_ep_nak_set(usbd_dev_handler, 0x04, 0); //开放USB接收
+			//usbd_ep_nak_set(usbd_dev_handler, 0x04, 0); //开放USB接收
 			USART_CR1(USART1) &= ~USART_CR1_TXEIE;
 			return;
 		} else {
-			usart_send(USART1, data); //发送数据
+			USART_DR(USART1) = data & USART_DR_MASK; //发送数据
 		}
+#else
+		USART_DR(USART1) = rx_buffer[rx_i] & USART_DR_MASK;
+		rx_i ++;
+		if(rx_i >= rx_len)
+		{
+			USART_CR1(USART1) &= ~USART_CR1_TXEIE;//关中断
+			usbd_ep_nak_set(usbd_dev_handler, 0x04, 0); //开放USB接收
+		}
+#endif
 	}
 }
 
