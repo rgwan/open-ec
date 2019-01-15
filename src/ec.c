@@ -576,7 +576,7 @@ static void serial_data_rx_cb(usbd_device *usbd_dev, uint8_t ep)
 	int len = usbd_ep_read_packet(usbd_dev, 0x04, buf, 64);
 	int remains = ring_remain(&serial_in_ring);
 	
-	if(remains < 72)
+	if(remains < 128)
 	{
 		usbd_ep_nak_set(usbd_dev, 0x04, 1); //阻塞
 	}
@@ -712,13 +712,7 @@ void usart1_isr(void) //串口中断
 	{
 
 		volatile int32_t data = ring_read_ch(&serial_in_ring, NULL);
-
-		volatile int size = ring_remain(&serial_in_ring);
-
-		if(size == 128)
-		{
-			usbd_ep_nak_set(usbd_dev_handler, 0x04, 0); //开放USB接收
-		}
+		
 		if (data == -1) { //没有即停止
 			USART_CR1(USART1) &= ~USART_CR1_TXEIE;
 			usbd_ep_nak_set(usbd_dev_handler, 0x04, 0); //开放USB接收
