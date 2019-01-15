@@ -104,6 +104,7 @@ static void clock_setup(void)
 	SCB_VTOR = 0x08000000; //TODO: Bootloader support
 }
 
+
 #define dtr_set() gpio_set(GPIOB, GPIO15); gpio_set(GPIOB, GPIO10)
 #define dtr_clr() gpio_clear(GPIOB, GPIO15); gpio_clear(GPIOB, GPIO10)
 
@@ -653,32 +654,36 @@ void sys_tick_handler(void)
 static void usb_packet_handler(void)
 {
 	uint8_t timeout;
-	if(ring_size(&serial_out_ring) > 62 )//&& st_usbfs_ep_out_free(usbd_dev_handler, 0x83)) //需要接收 (串口)
+	if(ring_size(&serial_out_ring) > 62 && usbd_ep_stall_get(usbd_dev_handler, 0x83) == 0) //需要接收 (串口)
 	{
 		ring_read(&serial_out_ring, bulkout_buf[1] + 2, 62);//读62个byte
-		timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 64) == 0) {timeout++; if (timeout > 10) break;} //发MPSSE
+		//timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 64) == 0) {timeout++; if (timeout > 4) break;} //发MPSSE
+		usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 64);
 	}
 
-	if(ring_size(&jtag_out_ring) > 62 )// && st_usbfs_ep_out_free(usbd_dev_handler, 0x81)) //需要接收 (MPSSE)
+	if(ring_size(&jtag_out_ring) > 62 && usbd_ep_stall_get(usbd_dev_handler, 0x81) == 0) //需要接收 (MPSSE)
 	{
 		ring_read(&jtag_out_ring, bulkout_buf[0] + 2, 62);//读62个byte
-		timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[1], 64) == 0) {timeout++; if (timeout > 10) break;} //发出去
+		//timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[1], 64) == 0) {timeout++; if (timeout > 4) break;} //发出去
+		usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[1], 64);
 	}	
 	
 	if((unsigned)(timer_count - last_send) > latency_timer[0]) //超时
 	{
 		last_send = timer_count;
 		int len;
-		//if(st_usbfs_ep_out_free(usbd_dev_handler, 0x81))
-		//{
+		if(usbd_ep_stall_get(usbd_dev_handler, 0x81) == 0)
+		{
 			len = ring_read(&jtag_out_ring, bulkout_buf[0] + 2, 62);//读N个byte
-			timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[0], 2 + len) == 0) {timeout++; if (timeout > 10) break;} //发MPSSE
-		//}
-		//if(st_usbfs_ep_out_free(usbd_dev_handler, 0x83))
-		//{
+			//timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[0], 2 + len) == 0) {timeout++; if (timeout > 4) break;} //发MPSSE
+			usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[0], 2 + len);
+		}
+		if(usbd_ep_stall_get(usbd_dev_handler, 0x83) == 0)
+		{
 			len = ring_read(&serial_out_ring, bulkout_buf[1] + 2, 62);//读N个byte
-			timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 2 + len) == 0) {timeout++; if (timeout > 10) break;} //发串口
-		//}
+			//timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 2 + len) == 0) {timeout++; if (timeout > 4) break;} //发串口
+			usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 2 + len);
+		}
 	}
 }
 /* 串口开始 */
