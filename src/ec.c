@@ -697,7 +697,7 @@ void sys_tick_handler(void)
 }
 
 static void usb_packet_handler(void)
-{
+{ //防止被USB中断抢占
 	uint8_t timeout;
 	if(ring_size(&serial_out_ring) > 62 && usbd_ep_stall_get(usbd_dev_handler, 0x83) == 0) //需要接收 (串口)
 	{
@@ -752,7 +752,6 @@ static void uart_setup(void)
 
 void usart1_isr(void) //串口中断
 {
-	//gpio_toggle(GPIOB, GPIO2);
 	if ((USART_SR(USART1) & USART_SR_RXNE) != 0) {
 		ring_write_ch(&serial_out_ring, USART_DR(USART1) & USART_DR_MASK); //接收
 	}
@@ -779,6 +778,7 @@ void usart1_isr(void) //串口中断
 		}
 #endif
 	}
+	gpio_toggle(GPIOB, GPIO2);
 }
 
 /* 串口结束 */
