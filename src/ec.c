@@ -553,9 +553,13 @@ static inline uint32_t ring_remain(volatile struct ring *ring)
 #define BUFFER_SIZE_IN 256
 #define BUFFER_SIZE_OUT 384
 
+#define SERIAL_IN_SINGLEBUF 1
+
 volatile struct ring jtag_in_ring;
 volatile struct ring jtag_out_ring;
+#if SERIAL_IN_SINGLEBUF
 volatile struct ring serial_in_ring;
+#endif
 volatile struct ring serial_out_ring;
 
 /* 256 byte的 收发缓冲区 */
@@ -568,7 +572,9 @@ static void ring_init_all(void)
 {
 	ring_init(&jtag_in_ring, ringbuf_jtag_in_buffer, BUFFER_SIZE_IN);
 	ring_init(&jtag_out_ring, ringbuf_jtag_out_buffer, BUFFER_SIZE_OUT);
+#if SERIAL_IN_SINGLEBUF
 	ring_init(&serial_in_ring, ringbuf_serial_in_buffer, BUFFER_SIZE_IN);
+#endif
 	ring_init(&serial_out_ring, ringbuf_serial_out_buffer, BUFFER_SIZE_OUT);
 }
 
@@ -594,10 +600,24 @@ static void jtag_data_rx_cb(usbd_device *usbd_dev, uint8_t ep)
 	gpio_toggle(GPIOB, GPIO2);
 }
 
+#if SERIAL_IN_SINGLEBUF
+uint8_t recv_buf[64];
+uint8_t recv_len;
+uint8_t recv_i;
+#endif
+
 static void serial_data_rx_cb(usbd_device *usbd_dev, uint8_t ep)
 {
 	(void)ep;
-
+#if SERIAL_IN_SINGLEBUF
+	recv_len = usbd_ep_read_packet(usbd_dev, 0x04, recv_buf, 64);
+	if (recv_len)
+	{
+		usbd_ep_nak_set(usbd_dev, 0x04, 1); //阻塞
+		recv_i = 0;
+		USART_CR1(USART1) |= USART_CR1_TXEIE;//开USART1空发送中断
+	}
+#else
 	uint8_t buf[64];
 	int len = usbd_ep_read_packet(usbd_dev, 0x04, buf, 64);
 	int remains = ring_remain(&serial_in_ring);
@@ -612,7 +632,7 @@ static void serial_data_rx_cb(usbd_device *usbd_dev, uint8_t ep)
 		ring_write(&serial_in_ring, buf, len);
 		USART_CR1(USART1) |= USART_CR1_TXEIE;//开USART1空发送中断
 	}
-	
+#endif
 }
 
 /* 数据处理结束 */
@@ -655,9 +675,9 @@ static void interrupt_setup(void)
 	nvic_set_priority(NVIC_USB_HP_CAN_TX_IRQ, 1 << 4);
 	nvic_set_priority(NVIC_SYSTICK_IRQ, 2 << 4);//systick最低优先级
 	
-	//nvic_enable_irq(NVIC_USB_HP_CAN_TX_IRQ);
+	nvic_enable_irq(NVIC_USB_HP_CAN_TX_IRQ);
 	nvic_enable_irq(NVIC_USB_LP_CAN_RX0_IRQ);
-	//nvic_enable_irq(NVIC_USB_WAKEUP_IRQ);
+	nvic_enable_irq(NVIC_USB_WAKEUP_IRQ);
 	nvic_enable_irq(NVIC_USART1_IRQ);
 
 
@@ -679,36 +699,36 @@ void sys_tick_handler(void)
 static void usb_packet_handler(void)
 {
 	uint8_t timeout;
-	if(ring_size(&serial_out_ring) > 62 )//&& usbd_ep_stall_get(usbd_dev_handler, 0x83) == 0) //需要接收 (串口)
+	if(ring_size(&serial_out_ring) > 62 && usbd_ep_stall_get(usbd_dev_handler, 0x83) == 0) //需要接收 (串口)
 	{
 		ring_read(&serial_out_ring, bulkout_buf[1] + 2, 62);//读62个byte
-		timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 64) == 0) {timeout++; if (timeout > 16) break;} //发MPSSE
-		//usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 64);
+		//timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 64) == 0) {timeout++; if (timeout > 16) break;} //发MPSSE
+		usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 64);
 	}
 
-	if(ring_size(&jtag_out_ring) > 62 )//&& usbd_ep_stall_get(usbd_dev_handler, 0x81) == 0) //需要接收 (MPSSE)
+	if(ring_size(&jtag_out_ring) > 62 && usbd_ep_stall_get(usbd_dev_handler, 0x81) == 0) //需要接收 (MPSSE)
 	{
 		ring_read(&jtag_out_ring, bulkout_buf[0] + 2, 62);//读62个byte
-		timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[1], 64) == 0) {timeout++; if (timeout > 16) break;} //发出去
-		//usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[1], 64);
+		//timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[1], 64) == 0) {timeout++; if (timeout > 16) break;} //发出去
+		usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[1], 64);
 	}	
 	
 	if((unsigned)(timer_count - last_send) > latency_timer[0]) //超时
 	{
 		last_send = timer_count;
 		int len;
-		//if(usbd_ep_stall_get(usbd_dev_handler, 0x81) == 0)
-		//{
+		if(usbd_ep_stall_get(usbd_dev_handler, 0x81) == 0)
+		{
 			len = ring_read(&jtag_out_ring, bulkout_buf[0] + 2, 62);//读N个byte
-			timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[0], 2 + len) == 0) {timeout++; if (timeout > 16) break;} //发MPSSE
-			//usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[0], 2 + len);
-		//}
-		//if(usbd_ep_stall_get(usbd_dev_handler, 0x83) == 0)
-		//{
+			//timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[0], 2 + len) == 0) {timeout++; if (timeout > 16) break;} //发MPSSE
+			usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[0], 2 + len);
+		}
+		if(usbd_ep_stall_get(usbd_dev_handler, 0x83) == 0)
+		{
 			len = ring_read(&serial_out_ring, bulkout_buf[1] + 2, 62);//读N个byte
-			timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 2 + len) == 0) {timeout++; if (timeout > 16) break;} //发串口
-			//usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 2 + len);
-		//}
+			//timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 2 + len) == 0) {timeout++; if (timeout > 16) break;} //发串口
+			usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 2 + len);
+		}
 	}
 }
 /* 串口开始 */
@@ -732,7 +752,7 @@ static void uart_setup(void)
 
 void usart1_isr(void) //串口中断
 {
-	gpio_toggle(GPIOB, GPIO2);
+	//gpio_toggle(GPIOB, GPIO2);
 	if ((USART_SR(USART1) & USART_SR_RXNE) != 0) {
 		ring_write_ch(&serial_out_ring, USART_DR(USART1) & USART_DR_MASK); //接收
 	}
@@ -740,7 +760,15 @@ void usart1_isr(void) //串口中断
 	/* 发送完成中断 */
 	if (((USART_SR(USART1) & USART_SR_TXE) != 0) && ((USART_CR1(USART1) & USART_CR1_TXEIE) != 0)) 
 	{
-
+#if SERIAL_IN_SINGLEBUF
+		USART_DR(USART1) = recv_buf[recv_i] & USART_DR_MASK;
+		recv_i ++;
+		if(recv_i >= recv_len)
+		{
+			usbd_ep_nak_set(usbd_dev_handler, 0x04, 0); //开放USB接收
+			USART_CR1(USART1) &= ~USART_CR1_TXEIE;
+		}
+#else
 		volatile int32_t data = ring_read_ch(&serial_in_ring, NULL);
 		
 		if (data == -1) { //没有即停止
@@ -749,6 +777,7 @@ void usart1_isr(void) //串口中断
 		} else {
 			USART_DR(USART1) = data & USART_DR_MASK; //发送数据
 		}
+#endif
 	}
 }
 
@@ -791,6 +820,7 @@ int main(void)
 		
 	while(1)
 	{
+		//usbd_poll(usbd_dev_handler);
 		if(attached)
 			usb_packet_handler();
 		mpsse_process();
