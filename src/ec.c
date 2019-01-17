@@ -112,7 +112,9 @@ static void clock_setup(void)
 #define rts_clr() gpio_clear(GPIOA, GPIO2); gpio_clear(GPIOB, GPIO11)
 
 static void gpio_setup(void)
-{
+{		
+	dtr_set();
+	rts_set();
 	/* LED 引脚 */
 	gpio_set_mode(GPIOB, GPIO_MODE_OUTPUT_50_MHZ,
 		      GPIO_CNF_OUTPUT_PUSHPULL, GPIO2 | GPIO10 | GPIO11);
@@ -132,10 +134,11 @@ static void gpio_setup(void)
 			GPIO_CNF_OUTPUT_PUSHPULL, GPIO14); //TMS
 	gpio_set_mode(GPIOA, GPIO_MODE_INPUT,
 			GPIO_CNF_INPUT_FLOAT, GPIO6); //TDO
+			
+	/* 防止电源短路 */
+	gpio_set_mode(GPIOB, GPIO_MODE_INPUT,
+			GPIO_CNF_INPUT_FLOAT, GPIO0 | GPIO1);
 	//暂且用Bitbang模拟MPSSE
-				
-	dtr_set();
-	rts_set();
 }
 
 /* Here it ends */
@@ -145,9 +148,7 @@ static void gpio_setup(void)
 #include <libopencm3/usb/usbd.h>
 
 usbd_device *usbd_dev_handler;
-
-
-uint8_t st_usbfs_ep_out_free(usbd_device *dev, uint8_t addr);
+uint8_t st_usbfs_ep_in_ready(usbd_device *dev, uint8_t addr);
 
 static const struct usb_device_descriptor dev = {
 	.bLength = USB_DT_DEVICE_SIZE,
@@ -314,7 +315,7 @@ enum ftdi_mpsse_mode
 
 
 uint8_t bulkout_buf[2][64] = {{0x01, 0x60}, {0x01, 0x60}};
-volatile uint8_t latency_timer[2] = {16, 16};
+volatile uint8_t latency_timer[2] = {3, 3};
 
 uint8_t dtr = 1, rts = 1;
 
@@ -331,8 +332,24 @@ static void uart_set_baudrate(int itdf_divisor)
 	int divisor = itdf_divisor & 0x3fff;
 	divisor <<= 4;
 	divisor |= frac[itdf_divisor >> 14];
-	int baudrate = C_CLK / divisor;
-	
+	int baudrate;
+	/* 驱动的workaround */
+	if(itdf_divisor == 0x01)
+	{ //2Mbps
+		baudrate = 2000000;
+	}
+	else if(itdf_divisor == 0x00)
+	{
+		baudrate = 3000000;
+	}
+	else
+	{
+		baudrate = C_CLK / divisor;
+	}
+	if(baudrate < 120 || baudrate > 3000000)
+	{
+		baudrate = 115200;
+	}
 	usart_set_baudrate(USART1, baudrate);
 }
 
@@ -714,7 +731,7 @@ void sys_tick_handler(void)
 static void usb_packet_handler(void)
 { //防止被USB中断抢占
 	uint8_t timeout;
-	if(ring_size(&serial_out_ring) > 62 && usbd_ep_stall_get(usbd_dev_handler, 0x83) == 0) //需要接收 (串口)
+	if(ring_size(&serial_out_ring) > 62 && st_usbfs_ep_in_ready(usbd_dev_handler, 0x83)) //需要接收 (串口)
 	{
 		ring_read(&serial_out_ring, bulkout_buf[1] + 2, 62);//读62个byte
 		//timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 64) == 0) {timeout++; if (timeout > 16) break;} //发MPSSE
@@ -723,7 +740,7 @@ static void usb_packet_handler(void)
 		asm("cpsie i");
 	}
 
-	if(ring_size(&jtag_out_ring) > 62 && usbd_ep_stall_get(usbd_dev_handler, 0x81) == 0) //需要接收 (MPSSE)
+	if(ring_size(&jtag_out_ring) > 62 && st_usbfs_ep_in_ready(usbd_dev_handler, 0x81)) //需要接收 (MPSSE)
 	{
 		ring_read(&jtag_out_ring, bulkout_buf[0] + 2, 62);//读62个byte
 		//timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[1], 64) == 0) {timeout++; if (timeout > 16) break;} //发出去
@@ -736,7 +753,7 @@ static void usb_packet_handler(void)
 	{
 		last_send = timer_count;
 		int len;
-		if(usbd_ep_stall_get(usbd_dev_handler, 0x81) == 0)
+		if(st_usbfs_ep_in_ready(usbd_dev_handler, 0x81))
 		{
 			len = ring_read(&jtag_out_ring, bulkout_buf[0] + 2, 62);//读N个byte
 			//timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[0], 2 + len) == 0) {timeout++; if (timeout > 16) break;} //发MPSSE
@@ -744,7 +761,7 @@ static void usb_packet_handler(void)
 			usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[0], 2 + len);
 			asm("cpsie i");
 		}
-		if(usbd_ep_stall_get(usbd_dev_handler, 0x83) == 0)
+		if(st_usbfs_ep_in_ready(usbd_dev_handler, 0x83))
 		{
 			len = ring_read(&serial_out_ring, bulkout_buf[1] + 2, 62);//读N个byte
 			//timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 2 + len) == 0) {timeout++; if (timeout > 16) break;} //发串口
@@ -821,7 +838,7 @@ static void mpsse_process(void)
 	static uint8_t mpsse_cmd = 0;
 	static uint32_t mpsse_length = 0;
 	static enum mpsse_state state = IDLE;
-	if(jtag_recv_i >= jtag_recv_len)
+	if(jtag_recv_i > jtag_recv_len)
 	{
 		usbd_ep_nak_set(usbd_dev_handler, 0x02, 0); //开放USB接收 
 		return ;
@@ -853,19 +870,16 @@ int main(void)
 	volatile int i;
 	
 	clock_setup();
-	
-	gpio_clear(GPIOB, GPIO2);
-	gpio_clear(GPIOB, GPIO11);
-	
-	ring_init_all(); //开环形缓冲区
 	gpio_setup();
-	uart_setup();
-	
+
 	gpio_clear(GPIOA, GPIO8); //关USB上拉 
 	
 	usbd_dev_handler = usbd_init(&st_usbfs_v1_usb_driver, &dev, &config, usb_strings, 2, usbd_control_buffer, sizeof(usbd_control_buffer));
 	usbd_register_set_config_callback(usbd_dev_handler, ec_set_config);
 	
+	ring_init_all(); //开环形缓冲区
+	uart_setup();
+		
 	interrupt_setup();/* 开中断 */
 
 	for (i = 0; i < 0x80000; i++)
@@ -878,7 +892,7 @@ int main(void)
 		//usbd_poll(usbd_dev_handler);
 		if(attached)
 			usb_packet_handler();
-		mpsse_process();
+		//mpsse_process();
 	}
 
 	return 0;
