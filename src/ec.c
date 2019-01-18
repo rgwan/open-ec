@@ -25,6 +25,7 @@
 #include <libopencm3/cm3/systick.h>
 #include <libopencm3/stm32/usart.h>
 #include <stdlib.h>
+#include "itdf.h"
 
 
 //TODO: Move platform specific code out from main.c
@@ -138,7 +139,7 @@ static void gpio_setup(void)
 	/* 防止电源短路 */
 	gpio_set_mode(GPIOB, GPIO_MODE_INPUT,
 			GPIO_CNF_INPUT_FLOAT, GPIO0 | GPIO1);
-	//暂且用Bitbang模拟MPSSE
+	//暂且用Bitbang模拟SESPM
 }
 
 /* Here it ends */
@@ -274,42 +275,6 @@ static void usb_int_relay(void)
 	usbd_poll(usbd_dev_handler);
 }
 
-#define FTDI_SET_REQUEST_TYPE 0x40
-#define FTDI_GET_REQUEST_TYPE 0xC0
-
-#define FTDI_SIO_RESET			0 /* Reset the port */
-#define FTDI_SIO_MODEM_CTRL		1 /* Set the modem control register */
-#define FTDI_SIO_SET_FLOW_CTRL		2 /* Set flow control register */
-#define FTDI_SIO_SET_BAUD_RATE		3 /* Set baud rate */
-#define FTDI_SIO_SET_DATA		4 /* Set the data characteristics of
-					     the port */
-#define FTDI_SIO_GET_MODEM_STATUS	5 /* Retrieve current value of modem
-					     status register */
-#define FTDI_SIO_SET_EVENT_CHAR		6 /* Set the event character */
-#define FTDI_SIO_SET_ERROR_CHAR		7 /* Set the error character */
-#define FTDI_SIO_SET_LATENCY_TIMER	9 /* Set the latency timer */
-#define FTDI_SIO_GET_LATENCY_TIMER	0x0a /* Get the latency timer */
-#define FTDI_SIO_SET_BITMODE		0x0b /* Set bitbang mode */
-#define FTDI_SIO_READ_PINS		0x0c /* Read immediate value of pins */
-#define FTDI_SIO_READ_EEPROM		0x90 /* Read EEPROM */
-
-#define FTDI_SIO_SET_DTR_MASK 0x1
-#define FTDI_SIO_SET_RTS_MASK 0x2
-
-/** MPSSE bitbang modes */
-enum ftdi_mpsse_mode
-{
-    BITMODE_RESET  = 0x00,    /**< switch off bitbang mode, back to regular serial/FIFO */
-    BITMODE_BITBANG= 0x01,    /**< classical asynchronous bitbang mode, introduced with B-type chips */
-    BITMODE_MPSSE  = 0x02,    /**< MPSSE mode, available on 2232x chips */
-    BITMODE_SYNCBB = 0x04,    /**< synchronous bitbang mode, available on 2232x and R-type chips  */
-    BITMODE_MCU    = 0x08,    /**< MCU Host Bus Emulation mode, available on 2232x chips */
-    /* CPU-style fifo mode gets set via EEPROM */
-    BITMODE_OPTO   = 0x10,    /**< Fast Opto-Isolated Serial Interface Mode, available on 2232x chips  */
-    BITMODE_CBUS   = 0x20,    /**< Bitbang on CBUS pins of R-type chips, configure in EEPROM before */
-    BITMODE_SYNCFF = 0x40,    /**< Single Channel Synchronous FIFO mode, available on 2232H chips */
-    BITMODE_FT1284 = 0x80,    /**< FT1284 mode, available on 232H chips */
-};
 
 /* Control request handler */
 
@@ -322,7 +287,11 @@ uint8_t dtr = 1, rts = 1;
 uint8_t handler_buf[8];
 /* 尴尬的双串口，虽然有一个根本没用 */
 
-volatile uint8_t mpsse_enable = 0;
+/* SESPM处理变量 */
+volatile uint8_t sespm_enable = 0;
+
+enum sespm_state_t sespm_state = IDLE;
+uint8_t sespm_bypass = 0;
 
 
 #define C_CLK  48000000
@@ -353,6 +322,7 @@ static void uart_set_baudrate(int itdf_divisor)
 	usart_set_baudrate(USART1, baudrate);
 }
 
+
 static int ec_control_request(usbd_device *usbd_dev, struct usb_setup_data *req, uint8_t **buf,
 		uint16_t *len, void (**complete)(usbd_device *usbd_dev, struct usb_setup_data *req))
 {
@@ -365,16 +335,26 @@ static int ec_control_request(usbd_device *usbd_dev, struct usb_setup_data *req,
 	
 	*len = 0;
 
-	if(req->bmRequestType == FTDI_SET_REQUEST_TYPE)
+	if(req->bmRequestType == ITDF_SET_REQUEST_TYPE)
 	{
 		switch (req->bRequest)
 		{ 
-			case FTDI_SIO_SET_LATENCY_TIMER:
+			case ITDF_SIO_RESET:
+			case ITDF_SIO_SET_FLOW_CTRL: //TODO: 实现流控
+			case ITDF_SIO_SET_DATA: //TODO: 实现校验位，停止位，数据位
+			case ITDF_SIO_SET_EVENT_CHAR:
+			case ITDF_SIO_SET_ERROR_CHAR:
+			case ITDF_SIO_WRITE_EEPROM:
+			case ITDF_SIO_TEST_EEPROM:
+			{
+				return 1; //这个时候只要微笑就好了
+			}
+			case ITDF_SIO_SET_LATENCY_TIMER:
 			{
 				latency_timer[port] = req->wValue & 0xff;
 				return 1;
 			}
-			case FTDI_SIO_SET_BAUD_RATE:
+			case ITDF_SIO_SET_BAUD_RATE:
 			{
 				if(port == 2)
 				{//设置波特率
@@ -383,15 +363,15 @@ static int ec_control_request(usbd_device *usbd_dev, struct usb_setup_data *req,
 				}
 				return 1;
 			}
-			case FTDI_SIO_MODEM_CTRL:
+			case ITDF_SIO_MODEM_CTRL:
 			{
-				if(port == 2) /* 忽略掉 MPSSE口 */
+				if(port == 2) /* 忽略掉 SESPM口 */
 				{
 				#if 1
 					uint8_t wValueH = req->wValue >> 8;
-					if(wValueH & FTDI_SIO_SET_DTR_MASK)
+					if(wValueH & ITDF_SIO_SET_DTR_MASK)
 					{
-						if(req->wValue & FTDI_SIO_SET_DTR_MASK)
+						if(req->wValue & ITDF_SIO_SET_DTR_MASK)
 						{
 							dtr = 1;
 						}
@@ -400,9 +380,9 @@ static int ec_control_request(usbd_device *usbd_dev, struct usb_setup_data *req,
 							dtr = 0;
 						}
 					}
-					if(wValueH & FTDI_SIO_SET_RTS_MASK)
+					if(wValueH & ITDF_SIO_SET_RTS_MASK)
 					{
-						if(req->wValue & FTDI_SIO_SET_RTS_MASK)
+						if(req->wValue & ITDF_SIO_SET_RTS_MASK)
 						{
 							rts = 1;
 						}
@@ -430,19 +410,23 @@ static int ec_control_request(usbd_device *usbd_dev, struct usb_setup_data *req,
 				}
 				return 1;
 			}
-			case FTDI_SIO_SET_BITMODE:
+			case ITDF_SIO_SET_BITMODE:
 			{
-				if(port == 1) /* MPSSE口 */
+				if(port == 1) /* SESPM口 */
 				{
-					enum ftdi_mpsse_mode mode = req->wValue >> 8;
-					uint8_t bitmask = req->wValue & 0xff;
+					enum itdf_sespm_mode mode = req->wValue >> 8;
+					//uint8_t bitmask = req->wValue & 0xff;
 					if(mode == BITMODE_RESET)
 					{//BITMODE复位
-						mpsse_enable = 0;
+						sespm_enable = 0;
+						sespm_bypass = 0;
+						sespm_state = IDLE;
 					}
-					else if(mode == BITMODE_MPSSE)
-					{//TODO: 仅支持MPSSE
-						mpsse_enable = 1;
+					else if(mode == BITMODE_SESPM)
+					{//TODO: 仅支持SESPM
+						sespm_enable = 1;
+						sespm_bypass = 0;
+						sespm_state = IDLE;
 					}
 				}
 				return 1;
@@ -453,31 +437,33 @@ static int ec_control_request(usbd_device *usbd_dev, struct usb_setup_data *req,
 	{
 		switch (req->bRequest)
 		{ 
-			case FTDI_SIO_GET_LATENCY_TIMER:
+			case ITDF_SIO_GET_LATENCY_TIMER:
 			{
 				handler_buf[0] = latency_timer[port];
 				*buf = handler_buf;
 				*len = 1; /* 送回latency_timer */
 				return 1;
 			}
-			case FTDI_SIO_GET_MODEM_STATUS:
+			case ITDF_SIO_GET_MODEM_STATUS:
 			{
-				handler_buf[0] = 0x60;
+				handler_buf[0] = 0x01;
+				handler_buf[1] = 0x60;
 				*buf = handler_buf;
-				*len = 1; /* Modem status */
+				*len = 2; /* Modem status */
 				return 1;
 			}
-			case FTDI_SIO_READ_EEPROM: /* 直接全部返回FF */
+			case ITDF_SIO_READ_EEPROM: /* 直接全部返回FF */
 			{
-				handler_buf[0] = 0xff;
-				handler_buf[1] = 0xff;
+				int eeprom_ar = req->wIndex & 0x3f;
+				handler_buf[0] = itdf_eeprom[eeprom_ar];
+				handler_buf[1] = itdf_eeprom[eeprom_ar] >> 8;
 				*len = 2;
 				*buf = handler_buf;
 				return 1;
 			}
 		}	
 	}
-	return 1; //TODO: 实现所有FT2232功能，这个时候只要微笑就好了
+	return 0; //TODO: 实现所有FT2232功能
 }
 
 /* USB数据处理开始 */
@@ -550,7 +536,7 @@ static inline int32_t ring_read(volatile struct ring *ring, uint8_t *data, ring_
 			return i;
 	}
 
-	return -i;
+	return 0;
 }
 
 
@@ -610,6 +596,7 @@ uint8_t jtag_recv_len;
 uint8_t jtag_recv_i;
 #endif
 
+
 static void jtag_data_rx_cb(usbd_device *usbd_dev, uint8_t ep)
 {
 	(void)ep;
@@ -627,12 +614,47 @@ static void jtag_data_rx_cb(usbd_device *usbd_dev, uint8_t ep)
 		usbd_ep_nak_set(usbd_dev, 0x02, 1); //阻塞
 	}
 #else
+	#if 0
 	jtag_recv_len = usbd_ep_read_packet(usbd_dev, 0x04, jtag_recv_buf, 64);
 	if (jtag_recv_len)
 	{
 		usbd_ep_nak_set(usbd_dev, 0x02, 1); //阻塞
 		jtag_recv_i = 0;
-	}	
+	}
+	#else
+		uint8_t buf[64];
+		static uint8_t sespm_cmd = 0;
+		
+		static uint8_t read_edge = 0;
+		static uint8_t bit_mode = 0;
+		static uint8_t write_edge = 0;
+		static uint8_t lsb_first = 0;
+		static uint8_t tdi_write = 0;
+		static uint8_t tdo_read = 0;
+		static uint8_t tms_write = 0;
+		
+		static uint16_t sespm_length = 0;
+		int len = usbd_ep_read_packet(usbd_dev, 0x02, buf, 64);
+		int i;
+		for(i = 0; i < len; i++)
+		{
+			switch(sespm_state)
+			{
+				case IDLE:
+				{
+					sespm_cmd = buf[i];
+					if(sespm_cmd & 0x80)
+					{ //特殊命令
+					}
+					else
+					{ //常规命令
+					}
+					
+					break;
+				}
+			}
+		}
+	#endif
 #endif
 }
 
@@ -676,8 +698,8 @@ static void ec_set_config(usbd_device *usbd_dev, uint16_t wValue)
 	
 	usbd_register_control_callback(
 				usbd_dev,
-				FTDI_SET_REQUEST_TYPE,
-				FTDI_SET_REQUEST_TYPE,
+				ITDF_SET_REQUEST_TYPE,
+				ITDF_SET_REQUEST_TYPE,
 				ec_control_request);
 
 	usbd_ep_setup(usbd_dev, 0x81, USB_ENDPOINT_ATTR_BULK, 64,
@@ -723,24 +745,24 @@ volatile uint16_t last_send = 0;
 
 void sys_tick_handler(void)
 {
-	//gpio_toggle(GPIOB, GPIO2);
 	timer_count ++;
+	if(timer_count % 16 == 0)
+		gpio_clear(GPIOB, GPIO2);
 }
 
 
 static void usb_packet_handler(void)
 { //防止被USB中断抢占
-	uint8_t timeout;
 	if(ring_size(&serial_out_ring) > 62 && st_usbfs_ep_in_ready(usbd_dev_handler, 0x83)) //需要接收 (串口)
 	{
 		ring_read(&serial_out_ring, bulkout_buf[1] + 2, 62);//读62个byte
-		//timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 64) == 0) {timeout++; if (timeout > 16) break;} //发MPSSE
+		//timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 64) == 0) {timeout++; if (timeout > 16) break;} //发SESPM
 		asm("cpsid i");
 		usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 64);
 		asm("cpsie i");
 	}
 
-	if(ring_size(&jtag_out_ring) > 62 && st_usbfs_ep_in_ready(usbd_dev_handler, 0x81)) //需要接收 (MPSSE)
+	if(ring_size(&jtag_out_ring) > 62 && st_usbfs_ep_in_ready(usbd_dev_handler, 0x81)) //需要接收 (SESPM)
 	{
 		ring_read(&jtag_out_ring, bulkout_buf[0] + 2, 62);//读62个byte
 		//timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[1], 64) == 0) {timeout++; if (timeout > 16) break;} //发出去
@@ -756,7 +778,7 @@ static void usb_packet_handler(void)
 		if(st_usbfs_ep_in_ready(usbd_dev_handler, 0x81))
 		{
 			len = ring_read(&jtag_out_ring, bulkout_buf[0] + 2, 62);//读N个byte
-			//timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[0], 2 + len) == 0) {timeout++; if (timeout > 16) break;} //发MPSSE
+			//timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[0], 2 + len) == 0) {timeout++; if (timeout > 16) break;} //发SESPM
 			asm("cpsid i");
 			usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[0], 2 + len);
 			asm("cpsie i");
@@ -795,11 +817,10 @@ void usart1_isr(void) //串口中断
 	if ((USART_SR(USART1) & USART_SR_RXNE) != 0) {
 		ring_write_ch(&serial_out_ring, USART_DR(USART1) & USART_DR_MASK); //接收
 	}
-
 	/* 发送完成中断 */
 	if (((USART_SR(USART1) & USART_SR_TXE) != 0) && ((USART_CR1(USART1) & USART_CR1_TXEIE) != 0)) 
 	{
-#if SERIAL_IN_SINGLEBUF
+	#if SERIAL_IN_SINGLEBUF
 		USART_DR(USART1) = serial_recv_buf[serial_recv_i] & USART_DR_MASK;
 		serial_recv_i ++;
 		if(serial_recv_i >= serial_recv_len)
@@ -807,7 +828,7 @@ void usart1_isr(void) //串口中断
 			usbd_ep_nak_set(usbd_dev_handler, 0x04, 0); //开放USB接收
 			USART_CR1(USART1) &= ~USART_CR1_TXEIE;
 		}
-#else
+	#else
 		volatile int32_t data = ring_read_ch(&serial_in_ring, NULL);
 		
 		if (data == -1) { //没有即停止
@@ -816,54 +837,13 @@ void usart1_isr(void) //串口中断
 		} else {
 			USART_DR(USART1) = data & USART_DR_MASK; //发送数据
 		}
-#endif
+	#endif
 	}
-	gpio_toggle(GPIOB, GPIO2);
+	gpio_set(GPIOB, GPIO2);
 }
 
 /* 串口结束 */
 
-/* MPSSE处理 */
-
-enum mpsse_state
-{
-	IDLE = 0,
-	RECV_LENH = 1,
-	RECV_LENL = 2,
-	RECV_DATA = 3
-};
-
-static void mpsse_process(void)
-{
-	static uint8_t mpsse_cmd = 0;
-	static uint32_t mpsse_length = 0;
-	static enum mpsse_state state = IDLE;
-	if(jtag_recv_i > jtag_recv_len)
-	{
-		usbd_ep_nak_set(usbd_dev_handler, 0x02, 0); //开放USB接收 
-		return ;
-	}
-	switch (state)
-	{
-		case IDLE: //糟糕的命令处理函数。。。
-		{
-			
-			break;
-		}
-		case RECV_LENH:
-		{
-			break;
-		}
-		case RECV_LENL:
-		{
-			break;
-		}
-		case RECV_DATA:
-		{
-			break;
-		}
-	}
-}
 
 int main(void)
 {
@@ -892,7 +872,7 @@ int main(void)
 		//usbd_poll(usbd_dev_handler);
 		if(attached)
 			usb_packet_handler();
-		//mpsse_process();
+		//sespm_process();
 	}
 
 	return 0;
