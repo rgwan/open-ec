@@ -557,6 +557,7 @@ static inline uint32_t ring_remain(volatile struct ring *ring)
 #define BUFFER_SIZE_OUT 256
 
 #define SERIAL_IN_SINGLEBUF 1
+#define UART_SEND_BLOCKING
 
 #if (!SERIAL_IN_SINGLEBUF)
 volatile struct ring serial_in_ring;
@@ -666,9 +667,15 @@ static void serial_data_rx_cb(usbd_device *usbd_dev, uint8_t ep)
 	serial_recv_len = usbd_ep_read_packet(usbd_dev, 0x04, serial_recv_buf, 64);
 	if (serial_recv_len)
 	{
+#ifdef UART_SEND_BLOCKING
+		int i;
+		for(i = 0; i < serial_recv_len; i++)
+			usart_send_blocking(USART1, serial_recv_buf[i]);
+#else
 		usbd_ep_nak_set(usbd_dev, 0x04, 1); //阻塞
 		serial_recv_i = 0;
 		USART_CR1(USART1) |= USART_CR1_TXEIE;//开USART1空发送中断
+#endif
 	}
 #else
 	uint8_t buf[64];
@@ -818,6 +825,7 @@ void usart1_isr(void) //串口中断
 		ring_write_ch(&serial_out_ring, USART_DR(USART1) & USART_DR_MASK); //接收
 	}
 	/* 发送完成中断 */
+#ifdef UART_SEND_BLOCKING
 	if (((USART_SR(USART1) & USART_SR_TXE) != 0) && ((USART_CR1(USART1) & USART_CR1_TXEIE) != 0)) 
 	{
 	#if SERIAL_IN_SINGLEBUF
@@ -839,6 +847,7 @@ void usart1_isr(void) //串口中断
 		}
 	#endif
 	}
+#endif
 	gpio_set(GPIOB, GPIO2);
 }
 
