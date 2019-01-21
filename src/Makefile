@@ -20,12 +20,14 @@
 
 BINARY = ec
 
+OBJS = usb_private.o
+
 LDSCRIPT = stm32f103x8.ld
 
 DFU_UTIL = dfu-util
 ST_FLASH = st-flash
 
-USB_ID	 = 1209:db42
+USB_ID	 = 1d50:6017
 
 LIBNAME		?= opencm3_stm32f1
 DEFS		?= -DSTM32F1 -O3
@@ -40,7 +42,7 @@ size: $(OBJS) $(BINARY).elf
 	
 dfu:  $(BINARY).bin
 	@printf "  FLASH   $<\n"
-	@$(DFU_UTIL) -d $(USB_ID) -D $(BINARY).bin
+	@$(DFU_UTIL) -d $(USB_ID) -D $(BINARY).bin -s 0x08002000
 stlink: $(BINARY).bin
 	@printf "  FLASH   $<\n"
-	@$(ST_FLASH) write $(BINARY).bin 0x08000000
+	@$(ST_FLASH) write $(BINARY).bin 0x08002000

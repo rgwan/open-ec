@@ -102,7 +102,7 @@ static void clock_setup(void)
 	//rcc_periph_clock_enable(RCC_AFIO);
 	rcc_periph_clock_enable(RCC_USART1);
 	
-	SCB_VTOR = 0x08000000; //TODO: Bootloader support
+	SCB_VTOR = 0x08002000; 
 }
 
 
@@ -147,9 +147,9 @@ static void gpio_setup(void)
 /* USB process */
 
 #include <libopencm3/usb/usbd.h>
+#include "usb_private.h"
 
 usbd_device *usbd_dev_handler;
-uint8_t st_usbfs_ep_in_ready(usbd_device *dev, uint8_t addr);
 
 static const struct usb_device_descriptor dev = {
 	.bLength = USB_DT_DEVICE_SIZE,
@@ -252,7 +252,7 @@ static const struct usb_config_descriptor config = {
 };
 
 static const char *usb_strings[] = {
-	"Zhiyuan Wan",
+	"Open-EC",
 	"USB Debugger"
 };
 
@@ -430,7 +430,7 @@ static int ec_control_request(usbd_device *usbd_dev, struct usb_setup_data *req,
 					}
 				}
 				return 1;
-			}
+			} //TODO: bootloader reset support
 		}
 	}
 	else
@@ -615,12 +615,12 @@ static void jtag_data_rx_cb(usbd_device *usbd_dev, uint8_t ep)
 		usbd_ep_nak_set(usbd_dev, 0x02, 1); //阻塞
 	}
 #else
-	#if 0
-	jtag_recv_len = usbd_ep_read_packet(usbd_dev, 0x04, jtag_recv_buf, 64);
+	#if 1
+	jtag_recv_len = usbd_ep_read_packet(usbd_dev, 0x02, jtag_recv_buf, 64);
 	if (jtag_recv_len)
 	{
-		usbd_ep_nak_set(usbd_dev, 0x02, 1); //阻塞
-		jtag_recv_i = 0;
+		ring_write(&jtag_out_ring, jtag_recv_buf, jtag_recv_len);
+
 	}
 	#else
 		uint8_t buf[64];
@@ -671,6 +671,7 @@ static void serial_data_rx_cb(usbd_device *usbd_dev, uint8_t ep)
 		int i;
 		for(i = 0; i < serial_recv_len; i++)
 			usart_send_blocking(USART1, serial_recv_buf[i]);
+		gpio_set(GPIOB, GPIO2);
 #else
 		usbd_ep_nak_set(usbd_dev, 0x04, 1); //阻塞
 		serial_recv_i = 0;
@@ -825,7 +826,7 @@ void usart1_isr(void) //串口中断
 		ring_write_ch(&serial_out_ring, USART_DR(USART1) & USART_DR_MASK); //接收
 	}
 	/* 发送完成中断 */
-#ifdef UART_SEND_BLOCKING
+#ifndef UART_SEND_BLOCKING
 	if (((USART_SR(USART1) & USART_SR_TXE) != 0) && ((USART_CR1(USART1) & USART_CR1_TXEIE) != 0)) 
 	{
 	#if SERIAL_IN_SINGLEBUF
