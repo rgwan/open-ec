@@ -300,7 +300,7 @@ static void uart_set_baudrate(int itdf_divisor)
 	uint8_t frac[] = {0, 8, 4, 2, 6, 10, 12, 14};
 	int divisor = itdf_divisor & 0x3fff;
 	divisor <<= 4;
-	divisor |= frac[itdf_divisor >> 14];
+	divisor |= frac[(itdf_divisor >> 14) & 0x07];
 	int baudrate;
 	/* 驱动的workaround */
 	if(itdf_divisor == 0x01)
@@ -615,7 +615,7 @@ static void jtag_data_rx_cb(usbd_device *usbd_dev, uint8_t ep)
 		usbd_ep_nak_set(usbd_dev, 0x02, 1); //阻塞
 	}
 #else
-	#if 1
+	#if 0
 	jtag_recv_len = usbd_ep_read_packet(usbd_dev, 0x02, jtag_recv_buf, 64);
 	if (jtag_recv_len)
 	{
@@ -625,32 +625,89 @@ static void jtag_data_rx_cb(usbd_device *usbd_dev, uint8_t ep)
 	#else
 		uint8_t buf[64];
 		static uint8_t sespm_cmd = 0;
-		
-		static uint8_t read_edge = 0;
-		static uint8_t bit_mode = 0;
-		static uint8_t write_edge = 0;
-		static uint8_t lsb_first = 0;
-		static uint8_t tdi_write = 0;
-		static uint8_t tdo_read = 0;
-		static uint8_t tms_write = 0;
-		
 		static uint16_t sespm_length = 0;
+		
 		int len = usbd_ep_read_packet(usbd_dev, 0x02, buf, 64);
 		int i;
 		for(i = 0; i < len; i++)
 		{
+			uint8_t jtag_data = buf[i];
 			switch(sespm_state)
 			{
 				case IDLE:
 				{
-					sespm_cmd = buf[i];
+					sespm_cmd = jtag_data;
 					if(sespm_cmd & 0x80)
 					{ //特殊命令
+						switch(sespm_cmd)
+						{
+							case 0x80:
+							{ /* 设置IO 状态 */
+								sespm_state = BUS_DATA;
+								break;
+							}
+							case 0x81:
+							{ /* 读取 */
+								uint8_t report = 0;
+								if(GPIOA_IDR & GPIO5)
+									report |= 0x01;
+								if(GPIOA_IDR & GPIO6)
+									report |= 0x04;
+								if(GPIOA_IDR & GPIO7)
+									report |= 0x02;
+								if(GPIOB_IDR & GPIO14)
+									report |= 0x08;
+								ring_write_ch(&jtag_out_ring, report);
+								break;
+							}
+							case 0x84:
+							{ /* Bypass On */
+								sespm_bypass = 1;
+								break;
+							}
+							case 0x85:
+							{ /* Bypass Off */
+								sespm_bypass = 0;
+								break;
+							}
+							default:
+							{ /* 错误命令 */
+								ring_write_ch(&jtag_out_ring, 0xfa);
+								ring_write_ch(&jtag_out_ring, sespm_cmd);
+							}
+						}
 					}
 					else
 					{ //常规命令
 					}
 					
+					break;
+				} //IDLE
+				case BUS_DATA: /* TCK TDI TDO TMS */
+				{
+					if(jtag_data & 0x02)
+						gpio_set(GPIOA, GPIO7); //TDI
+					else
+						gpio_clear(GPIOA, GPIO7);
+					if(jtag_data & 0x04)
+						gpio_set(GPIOA, GPIO6);
+					else
+						gpio_clear(GPIOA, GPIO6); //TDO
+					if(jtag_data & 0x08)
+						gpio_set(GPIOB, GPIO14); //TMS
+					else
+						gpio_clear(GPIOB, GPIO14);
+					
+					if(jtag_data & 0x01)
+						gpio_set(GPIOA, GPIO5);
+					else
+						gpio_clear(GPIOA, GPIO5); //TCK
+					sespm_state = BUS_DIR;
+					break;
+				}
+				case BUS_DIR:
+				{
+					sespm_state = IDLE;
 					break;
 				}
 			}

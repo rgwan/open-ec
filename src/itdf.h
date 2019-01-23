@@ -60,5 +60,8 @@ enum sespm_state_t
 	/* TMS 传输 */
 	TMS_RECV_LENGH = 4,
 	TMS_RECV_LENGL = 5,
-	TMS_DATA = 6
+	TMS_DATA = 6,
+	/* Bitbang */
+	BUS_DATA = 7,
+	BUS_DIR = 8
 };
