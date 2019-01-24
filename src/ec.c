@@ -633,6 +633,7 @@ static void jtag_data_rx_cb(usbd_device *usbd_dev, uint8_t ep)
 		
 		int len = usbd_ep_read_packet(usbd_dev, 0x02, buf, 64);
 		int i;
+		gpio_set(GPIOB, GPIO2);
 		for(i = 0; i < len; i++)
 		{
 			uint8_t jtag_data = buf[i];
@@ -772,17 +773,17 @@ bad_cmd:
 					for(j = 0; j < 8; j++)
 					{ // TCK 1 - 0 - 1
 						if(send_data & 0x01)
-							gpio_set(GPIOA, GPIO7);
+							gpio_set(GPIOA, GPIO7); //TDI
 						else
 							gpio_clear(GPIOA, GPIO7);
 							
-						gpio_clear(GPIOA, GPIO5);
+						gpio_clear(GPIOA, GPIO5); //TCK
 						DELAY();
 						gpio_set(GPIOA, GPIO5);
 						
 						recv_data >>= 1;
 						send_data >>= 1;
-						if(GPIOA_IDR & GPIO6)
+						if(GPIOA_IDR & GPIO6) //TDO
 							recv_data |= 0x80;
 					}
 					if(sespm_read)
@@ -807,17 +808,17 @@ bad_cmd:
 					for(j = 0; j <= sespm_length; j++)
 					{
 						if(send_data & 0x01)
-							gpio_set(GPIOA, GPIO7);
+							gpio_set(GPIOA, GPIO7); //TDI
 						else
 							gpio_clear(GPIOA, GPIO7);
 						
-						gpio_clear(GPIOA, GPIO5);
+						gpio_clear(GPIOA, GPIO5); //TCK
 						DELAY();
 						gpio_set(GPIOA, GPIO5);
 						
 						send_data >>= 1;
 						
-						if(GPIOA_IDR & GPIO6)
+						if(GPIOA_IDR & GPIO6) //TDO
 							recv_data |= (1 << j);
 					}
 					if(sespm_read)
@@ -837,24 +838,24 @@ bad_cmd:
 					uint8_t send_data = jtag_data;
 					int j;
 					if(send_data & 0x80)
-						gpio_set(GPIOA, GPIO7);
+						gpio_set(GPIOA, GPIO7); //TDI
 					else
 						gpio_clear(GPIOA, GPIO7);
 					for(j = 0; j <= sespm_length; j++)
 					{
 						if(send_data & 0x01)
-							gpio_set(GPIOB, GPIO14);
+							gpio_set(GPIOB, GPIO14); //TMS
 						else
 							gpio_clear(GPIOB, GPIO14);
 						
-						gpio_clear(GPIOA, GPIO5);
+						gpio_clear(GPIOA, GPIO5); //TCK
 						DELAY();
 						gpio_set(GPIOA, GPIO5);
 						
 						send_data >>= 1;
 						
 						if(GPIOA_IDR & GPIO6)
-							recv_data |= (1 << j);
+							recv_data |= (1 << j); //TDO
 					}
 					if(sespm_read)
 					{
