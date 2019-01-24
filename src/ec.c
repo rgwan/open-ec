@@ -136,6 +136,9 @@ static void gpio_setup(void)
 	gpio_set_mode(GPIOA, GPIO_MODE_INPUT,
 			GPIO_CNF_INPUT_FLOAT, GPIO6); //TDO
 			
+	gpio_set(GPIOA, GPIO5 | GPIO6 | GPIO7);
+	gpio_set(GPIOB, GPIO14);
+			
 	/* 防止电源短路 */
 	gpio_set_mode(GPIOB, GPIO_MODE_INPUT,
 			GPIO_CNF_INPUT_FLOAT, GPIO0 | GPIO1);
@@ -463,7 +466,7 @@ static int ec_control_request(usbd_device *usbd_dev, struct usb_setup_data *req,
 			}
 		}	
 	}
-	return 0; //TODO: 实现所有FT2232功能
+	return 0; //TODO: 实现所有ITDF功能
 }
 
 /* USB数据处理开始 */
@@ -626,6 +629,7 @@ static void jtag_data_rx_cb(usbd_device *usbd_dev, uint8_t ep)
 		uint8_t buf[64];
 		static uint8_t sespm_cmd = 0;
 		static uint16_t sespm_length = 0;
+		static uint8_t sespm_read = 0;
 		
 		int len = usbd_ep_read_packet(usbd_dev, 0x02, buf, 64);
 		int i;
@@ -637,7 +641,7 @@ static void jtag_data_rx_cb(usbd_device *usbd_dev, uint8_t ep)
 				case IDLE:
 				{
 					sespm_cmd = jtag_data;
-					if(sespm_cmd & 0x80)
+					if(sespm_cmd & ITDF_SIE_SPECIAL)
 					{ //特殊命令
 						switch(sespm_cmd)
 						{
@@ -670,15 +674,51 @@ static void jtag_data_rx_cb(usbd_device *usbd_dev, uint8_t ep)
 								sespm_bypass = 0;
 								break;
 							}
+							case 0x86:
+							{ //TODO: Divisor support
+								break;
+							}
 							default:
 							{ /* 错误命令 */
+bad_cmd:
 								ring_write_ch(&jtag_out_ring, 0xfa);
 								ring_write_ch(&jtag_out_ring, sespm_cmd);
+								break;
 							}
 						}
 					}
 					else
-					{ //常规命令
+					{ //TODO: 常规命令，必须LSB first，负写正读
+						if (!(sespm_cmd & ITDF_SIE_WRITE_MCE)) 
+							goto bad_cmd;
+						if (sespm_cmd & ITDF_SIE_READ_MCE)
+							goto bad_cmd;
+						if (!(sespm_cmd & ITDF_SIE_LSB_FIRST))
+							goto bad_cmd;
+					// 只允许TDI/TMS 二选一
+						if ((sespm_cmd & ITDF_SIE_WRITE_TDI) &&
+							(sespm_cmd & ITDF_SIE_WRITE_TMS))
+							goto bad_cmd;
+					/* 是否需要读取 */	
+						sespm_read = sespm_cmd & ITDF_SIE_READ_TDO;
+					/* 写 TDI */	
+						if (sespm_cmd & ITDF_SIE_WRITE_TDI)
+						{
+							if (sespm_cmd & ITDF_SIE_BIT_MODE)
+								sespm_state = TDI_RECV_LENG_BIT;
+							else
+								sespm_state = TDI_RECV_LENGL_BYTE;
+						}
+						
+						if (sespm_cmd & ITDF_SIE_WRITE_TMS)
+						{
+							if (sespm_cmd & ITDF_SIE_BIT_MODE)
+								sespm_state = TMS_RECV_LENG_BIT;
+							else
+							{ // We should never reached here
+								goto bad_cmd;
+							}
+						}
 					}
 					
 					break;
@@ -709,6 +749,123 @@ static void jtag_data_rx_cb(usbd_device *usbd_dev, uint8_t ep)
 				{
 					sespm_state = IDLE;
 					break;
+				}
+				case TDI_RECV_LENGL_BYTE:
+				case TDI_RECV_LENG_BIT:
+				case TMS_RECV_LENG_BIT:
+				{
+					sespm_length = jtag_data;
+					sespm_state ++;
+					break;
+				}
+				case TDI_RECV_LENGH_BYTE:
+				{
+					sespm_length |= (jtag_data << 8);
+					sespm_state ++;
+					break;
+				}
+				case TDI_DATA_BYTE:
+				{
+					uint8_t recv_data = 0;
+					uint8_t send_data = jtag_data;
+					int j;
+					for(j = 0; j < 8; j++)
+					{ // TCK 1 - 0 - 1
+						if(send_data & 0x01)
+							gpio_set(GPIOA, GPIO7);
+						else
+							gpio_clear(GPIOA, GPIO7);
+							
+						gpio_clear(GPIOA, GPIO5);
+						DELAY();
+						gpio_set(GPIOA, GPIO5);
+						
+						recv_data >>= 1;
+						send_data >>= 1;
+						if(GPIOA_IDR & GPIO6)
+							recv_data |= 0x80;
+					}
+					if(sespm_read)
+					{
+						if(sespm_bypass)
+							ring_write_ch(&jtag_out_ring, jtag_data);
+						else
+							ring_write_ch(&jtag_out_ring, recv_data);
+					}
+						
+					if (sespm_length == 0)
+						sespm_state = IDLE;
+					else
+						sespm_length --;
+					break;
+				}
+				case TDI_DATA_BIT:
+				{
+					uint8_t recv_data = 0;
+					uint8_t send_data = jtag_data;
+					int j;
+					for(j = 0; j <= sespm_length; j++)
+					{
+						if(send_data & 0x01)
+							gpio_set(GPIOA, GPIO7);
+						else
+							gpio_clear(GPIOA, GPIO7);
+						
+						gpio_clear(GPIOA, GPIO5);
+						DELAY();
+						gpio_set(GPIOA, GPIO5);
+						
+						send_data >>= 1;
+						
+						if(GPIOA_IDR & GPIO6)
+							recv_data |= (1 << j);
+					}
+					if(sespm_read)
+					{
+						if(sespm_bypass)
+							ring_write_ch(&jtag_out_ring, jtag_data);
+						else
+							ring_write_ch(&jtag_out_ring, recv_data);
+					}
+					
+					sespm_state = IDLE;				
+					break;
+				}
+				case TMS_DATA_BIT:
+				{
+					uint8_t recv_data = 0;
+					uint8_t send_data = jtag_data;
+					int j;
+					if(send_data & 0x80)
+						gpio_set(GPIOA, GPIO7);
+					else
+						gpio_clear(GPIOA, GPIO7);
+					for(j = 0; j <= sespm_length; j++)
+					{
+						if(send_data & 0x01)
+							gpio_set(GPIOB, GPIO14);
+						else
+							gpio_clear(GPIOB, GPIO14);
+						
+						gpio_clear(GPIOA, GPIO5);
+						DELAY();
+						gpio_set(GPIOA, GPIO5);
+						
+						send_data >>= 1;
+						
+						if(GPIOA_IDR & GPIO6)
+							recv_data |= (1 << j);
+					}
+					if(sespm_read)
+					{
+						if(sespm_bypass)
+							ring_write_ch(&jtag_out_ring, jtag_data);
+						else
+							ring_write_ch(&jtag_out_ring, recv_data);
+					}
+					
+					sespm_state = IDLE;				
+					break;					
 				}
 			}
 		}

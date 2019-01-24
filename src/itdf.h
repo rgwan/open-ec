@@ -50,18 +50,37 @@ const uint16_t itdf_eeprom [] =
 	0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x1027 
 };
 
+#define ITDF_SIE_WRITE_MCE		(1 << 0)
+#define ITDF_SIE_BIT_MODE		(1 << 1)
+#define ITDF_SIE_READ_MCE		(1 << 2)
+#define ITDF_SIE_LSB_FIRST		(1 << 3)
+#define ITDF_SIE_WRITE_TDI		(1 << 4)
+#define ITDF_SIE_READ_TDO		(1 << 5)
+#define ITDF_SIE_WRITE_TMS		(1 << 6)
+#define ITDF_SIE_SPECIAL		(1 << 7)
+
+#define DELAY() asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop")
+
 enum sespm_state_t
 {
 	IDLE = 0,
-	/* TDI 传输 */
-	TDI_RECV_LENGH = 1,
-	TDI_RECV_LENGL = 2,
-	TDI_DATA = 3,
-	/* TMS 传输 */
-	TMS_RECV_LENGH = 4,
-	TMS_RECV_LENGL = 5,
-	TMS_DATA = 6,
+	/* TDI 字节传输 */
+	TDI_RECV_LENGL_BYTE = 1,
+	TDI_RECV_LENGH_BYTE = 2,
+	TDI_DATA_BYTE = 3,
+#if 0
+	/* TMS 字节传输, 不使用 */
+	TMS_RECV_LENGL_BYTE = 4,
+	TMS_RECV_LENGH_BYTE = 5,
+	TMS_DATA_BYTE = 6,
+#endif
 	/* Bitbang */
 	BUS_DATA = 7,
-	BUS_DIR = 8
+	BUS_DIR = 8,
+	/* TDI 位传输 */
+	TDI_RECV_LENG_BIT = 9,
+	TDI_DATA_BIT = 10,
+	/* TMS 位传输 */
+	TMS_RECV_LENG_BIT = 11,
+	TMS_DATA_BIT = 12
 };
