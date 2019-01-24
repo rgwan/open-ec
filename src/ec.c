@@ -890,7 +890,7 @@ static void serial_data_rx_cb(usbd_device *usbd_dev, uint8_t ep)
 #else
 		usbd_ep_nak_set(usbd_dev, 0x04, 1); //阻塞
 		serial_recv_i = 0;
-		USART_CR1(USART1) |= USART_CR1_TXEIE;//开USART1空发送中断
+		//USART_CR1(USART1) |= USART_CR1_TXEIE;//开USART1空发送中断
 #endif
 	}
 #else
@@ -906,7 +906,7 @@ static void serial_data_rx_cb(usbd_device *usbd_dev, uint8_t ep)
 	if(len)
 	{
 		ring_write(&serial_in_ring, buf, len);
-		USART_CR1(USART1) |= USART_CR1_TXEIE;//开USART1空发送中断
+		//USART_CR1(USART1) |= USART_CR1_TXEIE;//开USART1空发送中断
 	}
 #endif
 }
@@ -938,6 +938,7 @@ static void ec_set_config(usbd_device *usbd_dev, uint16_t wValue)
 
 static void interrupt_setup(void)
 {
+	asm("cpsid i");
 	/* 开一个 1ms 的定时器 */
 	systick_set_clocksource(STK_CSR_CLKSOURCE_AHB_DIV8); /* 72MHz / 8 = 9MHz */
 	/* 定时器每N次中断一次 */
@@ -959,6 +960,7 @@ static void interrupt_setup(void)
 
 	/* 开接收中断 */
 	USART_CR1(USART1) |= USART_CR1_RXNEIE;
+	USART_CR1(USART1) &= ~USART_CR1_TXEIE;
 
 	__asm__("cpsie i"); 
 }
@@ -980,18 +982,18 @@ static void usb_packet_handler(void)
 	{
 		ring_read(&serial_out_ring, bulkout_buf[1] + 2, 62);//读62个byte
 		//timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 64) == 0) {timeout++; if (timeout > 16) break;} //发SESPM
-		asm("cpsid i");
+		//asm("cpsid i");
 		usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 64);
-		asm("cpsie i");
+		//asm("cpsie i");
 	}
 
 	if(ring_size(&jtag_out_ring) > 62 && st_usbfs_ep_in_ready(usbd_dev_handler, 0x81)) //需要接收 (SESPM)
 	{
 		ring_read(&jtag_out_ring, bulkout_buf[0] + 2, 62);//读62个byte
 		//timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[1], 64) == 0) {timeout++; if (timeout > 16) break;} //发出去
-		asm("cpsid i");
+		//asm("cpsid i");
 		usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[0], 64);
-		asm("cpsie i");
+		//asm("cpsie i");
 	}	
 	
 	if((unsigned)(timer_count - last_send) > latency_timer[0]) //超时
@@ -1002,17 +1004,17 @@ static void usb_packet_handler(void)
 		{
 			len = ring_read(&jtag_out_ring, bulkout_buf[0] + 2, 62);//读N个byte
 			//timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[0], 2 + len) == 0) {timeout++; if (timeout > 16) break;} //发SESPM
-			asm("cpsid i");
+			//asm("cpsid i");
 			usbd_ep_write_packet(usbd_dev_handler, 0x81, bulkout_buf[0], 2 + len);
-			asm("cpsie i");
+			//asm("cpsie i");
 		}
 		if(st_usbfs_ep_in_ready(usbd_dev_handler, 0x83))
 		{
 			len = ring_read(&serial_out_ring, bulkout_buf[1] + 2, 62);//读N个byte
 			//timeout = 0;while(usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 2 + len) == 0) {timeout++; if (timeout > 16) break;} //发串口
-			asm("cpsid i");
+			//asm("cpsid i");
 			usbd_ep_write_packet(usbd_dev_handler, 0x83, bulkout_buf[1], 2 + len);
-			asm("cpsie i");
+			//asm("cpsie i");
 		}
 	}
 }
@@ -1037,7 +1039,10 @@ static void uart_setup(void)
 
 void usart1_isr(void) //串口中断
 {
-	if ((USART_SR(USART1) & USART_SR_RXNE) != 0) {
+	if (((USART_SR(USART1) & USART_SR_RXNE) != 0) || 
+		((USART_SR(USART1) & USART_SR_ORE) != 0) ||
+		((USART_SR(USART1) & USART_SR_NE) != 0) ||
+		((USART_SR(USART1) & USART_SR_FE) != 0)) {
 		ring_write_ch(&serial_out_ring, USART_DR(USART1) & USART_DR_MASK); //接收
 	}
 	/* 发送完成中断 */
