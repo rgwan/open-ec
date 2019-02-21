@@ -322,6 +322,10 @@ static void uart_set_baudrate(int itdf_divisor)
 	{
 		baudrate = 115200;
 	}
+	if(itdf_divisor == 0x2710) //300bps转义为4.5Mbps
+	{
+		baudrate = 4500000;
+	}
 	usart_set_baudrate(USART1, baudrate);
 }
 
