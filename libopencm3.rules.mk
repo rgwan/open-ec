@@ -56,10 +56,9 @@ ifeq ($(strip $(OPENCM3_DIR)),)
 # user has not specified the library path, so we try to detect it
 
 # where we search for the library
-LIBPATHS := ./libopencm3 ../libopencm3 ../../libopencm3 ../../../../../libopencm3
-
-OPENCM3_DIR := $(wildcard $(LIBPATHS:=/locm3.sublime-project))
-OPENCM3_DIR := $(firstword $(dir $(OPENCM3_DIR)))
+# credit: https://stackoverflow.com/questions/18136918/how-to-get-current-relative-directory-of-your-makefile
+mkfile_path := $(abspath $(lastword $(MAKEFILE_LIST)))
+OPENCM3_DIR := $(patsubst %/,%,$(dir $(mkfile_path)))/libopencm3
 
 ifeq ($(strip $(OPENCM3_DIR)),)
 $(warning Cannot find libopencm3 library in the standard search paths.)
